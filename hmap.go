@@ -70,11 +70,33 @@ func (m *Map[V]) getIndex(key string) int {
 	return int(h.Sum64() & uint64(len(m.maps)-1))
 }
 
-func (m *Map[V]) Set(key string, value V) {
+func (m *Map[V]) Set(key string, value V, onlyIfNotExist ...bool) V {
+	ifNotExist := false
+	if len(onlyIfNotExist) > 0 {
+		ifNotExist = onlyIfNotExist[0]
+	}
 	index := m.getIndex(key)
+	if ifNotExist {
+		val, ok := func() (V, bool) {
+			m.maps[index].mut.RLock()
+			defer m.maps[index].mut.RUnlock()
+			val, ok := m.maps[index].maps[key]
+			return val, ok
+		}()
+		if ok {
+			return val
+		}
+	}
+
 	m.maps[index].mut.Lock()
 	defer m.maps[index].mut.Unlock()
+	if ifNotExist {
+		if val, ok := m.maps[index].maps[key]; ok {
+			return val
+		}
+	}
 	m.maps[index].maps[key] = value
+	return value
 }
 
 func (m *Map[V]) Get(key string, defaultValue ...V) (V, bool) {
@@ -88,11 +110,15 @@ func (m *Map[V]) Get(key string, defaultValue ...V) (V, bool) {
 	return value, ok
 }
 
-func (m *Map[V]) Del(key string) {
+func (m *Map[V]) Delete(key string) bool {
 	index := m.getIndex(key)
 	m.maps[index].mut.Lock()
 	defer m.maps[index].mut.Unlock()
-	delete(m.maps[index].maps, key)
+	_, ok := m.maps[index].maps[key]
+	if ok {
+		delete(m.maps[index].maps, key)
+	}
+	return ok
 }
 
 func (m *Map[V]) Len() int {

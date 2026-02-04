@@ -42,7 +42,7 @@ import "your-module-path/hmap"
 func main() {
     // 创建 Map（默认 32 分片）
     m := hmap.New[string]()
-    
+
     // 基本操作
     m.Set("name", "Alice")
     value, ok := m.Get("name")
@@ -78,8 +78,16 @@ m3 := hmap.New[*User](128)     // 128 分片，存储指针类型
 #### Set - 设置键值对
 
 ```go
-func (m *Map[V]) Set(key string, value V)
+func (m *Map[V]) Set(key string, value V, onlyOnExist ...bool) V
 ```
+
+| 返回值 | 说明 |
+|-------|------|
+| `onlyOnExist` | 为true时，仅当key不存在时才会创建，默认false |
+
+| 返回值 | 说明 |
+|-------|------|
+| `V` | 设置的值或已经存在的值 |
 
 ```go
 m.Set("user:1001", User{Name: "Alice"})
@@ -108,11 +116,15 @@ value, ok := m.Get("user:1001", User{Name: "Unknown"})
 
 ---
 
-#### Del - 删除键
+#### Delete - 删除键
 
 ```go
-func (m *Map[V]) Del(key string)
+func (m *Map[V]) Delete(key string) bool
 ```
+
+| 返回值 | 说明 |
+|-------|------|
+| `bool` | 键是否存在 |
 
 ```go
 m.Del("user:1001")
@@ -158,7 +170,7 @@ func (m *Map[V]) GetAllMaps() map[string]V
 ```
 
 > ⚠️ **注意**：返回的是浅拷贝；并发环境下可能非完全一致的快照
-> 
+>
 > ⚠️ **性能警告**: 会进行全量数据拷贝。
 
 ---
@@ -208,22 +220,22 @@ import (
 func main() {
     // 创建存储用户信息的 Map
     users := hmap.New[User]()
-    
+
     // 添加用户
     users.Set("u1", User{Name: "Alice", Age: 25})
     users.Set("u2", User{Name: "Bob", Age: 30})
-    
+
     // 获取用户
     if user, ok := users.Get("u1"); ok {
         fmt.Printf("Found: %s\n", user.Name)
     }
-    
+
     // 遍历
     users.Range(func(key string, user User) bool {
         fmt.Printf("%s -> %s\n", key, user.Name)
         return true
     })
-    
+
     // 统计
     fmt.Printf("Total users: %d\n", users.Len())
 }
@@ -239,9 +251,9 @@ type User struct {
 ```go
 func main() {
     m := hmap.New[int](64)  // 高并发建议增加分片数
-    
+
     var wg sync.WaitGroup
-    
+
     // 并发写入
     for i := 0; i < 1000; i++ {
         wg.Add(1)
@@ -250,7 +262,7 @@ func main() {
             m.Set(fmt.Sprintf("key:%d", n), n)
         }(i)
     }
-    
+
     // 并发读取
     for i := 0; i < 1000; i++ {
         wg.Add(1)
@@ -259,7 +271,7 @@ func main() {
             m.Get(fmt.Sprintf("key:%d", n))
         }(i)
     }
-    
+
     wg.Wait()
     fmt.Printf("Final count: %d\n", m.Len())
 }
