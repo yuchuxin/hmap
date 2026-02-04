@@ -78,12 +78,12 @@ m3 := hmap.New[*User](128)     // 128 分片，存储指针类型
 #### Set - 设置键值对
 
 ```go
-func (m *Map[V]) Set(key string, value V, onlyOnExist ...bool) V
+func (m *Map[V]) Set(key string, value V, onlyIfNotExist ...bool) V
 ```
 
 | 返回值 | 说明 |
 |-------|------|
-| `onlyOnExist` | 为true时，仅当key不存在时才会创建，默认false |
+| `onlyIfNotExist` | 为true时，仅当key不存在时才会创建，默认false |
 
 | 返回值 | 说明 |
 |-------|------|
