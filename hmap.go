@@ -7,18 +7,20 @@ import (
 )
 
 const (
-	defaultShardCount = 1 << 5 // 32
+	defaultShardCount = 1 << 6 // 64
 )
 
-type MapItem[V any] struct {
-	mut  *sync.RWMutex
-	maps map[string]V
+type mapItem[V any] struct {
+	sync.RWMutex
+	data map[string]V
+	_    [32]byte // padding to avoid false sharing
 }
 
+// Map字段名首字母均小写，避免外部使用时跳过New()函数使用结构体创建对象
+// 所有字段均为指针类型，避免外部修改结构体字段或数据复制导致数据不一致
 type Map[V any] struct {
-	maps []MapItem[V]
-	seed maphash.Seed
-	pool sync.Pool
+	datas []*mapItem[V]
+	seed  *maphash.Seed
 }
 
 func trueShards(shardCount int) int {
@@ -44,134 +46,133 @@ func New[V any](inShardCount ...int) *Map[V] {
 		shardCount = trueShards(inShardCount[0])
 	}
 
+	seed := maphash.MakeSeed()
 	m := &Map[V]{
-		seed: maphash.MakeSeed(),
-		maps: make([]MapItem[V], shardCount),
-		pool: sync.Pool{
-			New: func() any {
-				return new(maphash.Hash)
-			}},
+		seed:  &seed,
+		datas: make([]*mapItem[V], shardCount),
 	}
-	for i := range m.maps {
-		m.maps[i] = MapItem[V]{
-			maps: make(map[string]V),
-			mut:  &sync.RWMutex{},
+	for i := range m.datas {
+		m.datas[i] = &mapItem[V]{
+			data: make(map[string]V),
 		}
 	}
 	return m
 }
 
 func (m *Map[V]) getIndex(key string) int {
-	h := m.pool.Get().(*maphash.Hash)
-	defer m.pool.Put(h)
-	h.Reset()
-	h.SetSeed(m.seed)
-	h.WriteString(key)
-	return int(h.Sum64() & uint64(len(m.maps)-1))
+	hash := maphash.String(*m.seed, key)
+	return int(hash & uint64(len(m.datas)-1))
 }
 
-func (m *Map[V]) Set(key string, value V, onlyIfNotExist ...bool) V {
-	ifNotExist := false
-	if len(onlyIfNotExist) > 0 {
-		ifNotExist = onlyIfNotExist[0]
-	}
+func (m *Map[V]) Set(key string, value V) {
 	index := m.getIndex(key)
-	if ifNotExist {
-		val, ok := func() (V, bool) {
-			m.maps[index].mut.RLock()
-			defer m.maps[index].mut.RUnlock()
-			val, ok := m.maps[index].maps[key]
-			return val, ok
-		}()
-		if ok {
-			return val
-		}
-	}
-
-	m.maps[index].mut.Lock()
-	defer m.maps[index].mut.Unlock()
-	if ifNotExist {
-		if val, ok := m.maps[index].maps[key]; ok {
-			return val
-		}
-	}
-	m.maps[index].maps[key] = value
-	return value
+	m.datas[index].Lock()
+	defer m.datas[index].Unlock()
+	m.datas[index].data[key] = value
 }
 
-func (m *Map[V]) Get(key string, defaultValue ...V) (V, bool) {
+func (m *Map[V]) SetWithNotExist(key string, value V) (V, bool) {
 	index := m.getIndex(key)
-	m.maps[index].mut.RLock()
-	defer m.maps[index].mut.RUnlock()
-	value, ok := m.maps[index].maps[key]
-	if !ok && len(defaultValue) > 0 {
-		value = defaultValue[0]
+	m.datas[index].Lock()
+	defer m.datas[index].Unlock()
+	if val, ok := m.datas[index].data[key]; ok {
+		return val, false
+	}
+	m.datas[index].data[key] = value
+	return value, true
+}
+
+func (m *Map[V]) Get(key string) (V, bool) {
+	index := m.getIndex(key)
+	m.datas[index].RLock()
+	defer m.datas[index].RUnlock()
+	value, ok := m.datas[index].data[key]
+	return value, ok
+}
+
+func (m *Map[V]) GetWithDefault(key string, defaultValue V) (V, bool) {
+	index := m.getIndex(key)
+	m.datas[index].RLock()
+	defer m.datas[index].RUnlock()
+	value, ok := m.datas[index].data[key]
+	if !ok {
+		value = defaultValue
 	}
 	return value, ok
 }
 
 func (m *Map[V]) Delete(key string) bool {
 	index := m.getIndex(key)
-	m.maps[index].mut.Lock()
-	defer m.maps[index].mut.Unlock()
-	_, ok := m.maps[index].maps[key]
-	if ok {
-		delete(m.maps[index].maps, key)
+
+	m.datas[index].Lock()
+	defer m.datas[index].Unlock()
+	_, ok := m.datas[index].data[key]
+	if !ok {
+		return false
 	}
-	return ok
+	delete(m.datas[index].data, key)
+	return true
+}
+
+// 为保证数据一致性，锁内执行delIf函数
+// 在delIf函数中进行读取，修改等操作，可能导致key落在同一片分片导致死锁
+func (m *Map[V]) DeleteIf(key string, delIf func(V) bool) bool {
+	index := m.getIndex(key)
+
+	m.datas[index].Lock()
+	defer m.datas[index].Unlock()
+	val, ok := m.datas[index].data[key]
+	if !ok {
+		return false
+	}
+	if !delIf(val) {
+		return false
+	}
+	delete(m.datas[index].data, key)
+	return true
 }
 
 func (m *Map[V]) Len() int {
 	var count int
-	for i := range m.maps {
+	for i := range m.datas {
 		func() {
-			m.maps[i].mut.RLock()
-			defer m.maps[i].mut.RUnlock()
-			count += len(m.maps[i].maps)
+			m.datas[i].RLock()
+			defer m.datas[i].RUnlock()
+			count += len(m.datas[i].data)
 		}()
 	}
 	return count
 }
 
-func (m *Map[V]) GetMaps(index int) map[string]V {
-	if index < 0 || index >= len(m.maps) {
-		return nil
-	}
-	m.maps[index].mut.RLock()
-	defer m.maps[index].mut.RUnlock()
-	result := make(map[string]V, len(m.maps[index].maps))
-	maps.Copy(result, m.maps[index].maps)
-	return result
-}
-
-func (m *Map[V]) GetAllMaps() map[string]V {
-	re := map[string]V{}
-	for i := range m.maps {
+// 主要是用于内部调试，观察分片数据是否倾斜
+func (m *Map[V]) LenWithSlice() []int {
+	counts := make([]int, 0, len(m.datas))
+	for i := range m.datas {
 		func() {
-			m.maps[i].mut.RLock()
-			defer m.maps[i].mut.RUnlock()
-			maps.Copy(re, m.maps[i].maps)
+			m.datas[i].RLock()
+			defer m.datas[i].RUnlock()
+			counts = append(counts, len(m.datas[i].data))
 		}()
 	}
-	return re
+	return counts
 }
 
 func (m *Map[V]) Clear() {
-	for i := range m.maps {
+	for i := range m.datas {
 		func() {
-			m.maps[i].mut.Lock()
-			defer m.maps[i].mut.Unlock()
-			m.maps[i].maps = make(map[string]V)
+			m.datas[i].Lock()
+			defer m.datas[i].Unlock()
+			m.datas[i].data = make(map[string]V)
 		}()
 	}
 }
 
 func (m *Map[V]) Range(f func(key string, value V) bool) {
-	for i := range m.maps {
-		m.maps[i].mut.RLock()
-		tmpMaps := make(map[string]V, len(m.maps[i].maps))
-		maps.Copy(tmpMaps, m.maps[i].maps)
-		m.maps[i].mut.RUnlock()
+	for i := range m.datas {
+		m.datas[i].RLock()
+		tmpMaps := make(map[string]V, len(m.datas[i].data))
+		maps.Copy(tmpMaps, m.datas[i].data)
+		m.datas[i].RUnlock()
 		for key, value := range tmpMaps {
 			if !f(key, value) {
 				return
@@ -180,6 +181,41 @@ func (m *Map[V]) Range(f func(key string, value V) bool) {
 	}
 }
 
+// Prune方法会在持有锁的情况下进行分片遍历
+// 如果在 f 函数中进行读取，修改等操作，可能导致key落在同一片分片导致死锁
+// f 函数返回值：
+//
+//	true ：删除该数据
+//	false：保留该数据
+//	error：停止清洗操作，返回错误
+func (m *Map[V]) Prune(f func(key string, value V) (bool, error)) (int, int, error) {
+	delNum := 0
+	nowNum := 0
+	for i := range m.datas {
+		err := func() error {
+			m.datas[i].Lock()
+			defer m.datas[i].Unlock()
+			for key, value := range m.datas[i].data {
+				ok, err := f(key, value)
+				if err != nil {
+					return err
+				}
+				if ok {
+					delNum++
+					delete(m.datas[i].data, key)
+				} else {
+					nowNum++
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return delNum, nowNum, err
+		}
+	}
+	return delNum, nowNum, nil
+}
+
 func (m *Map[V]) ShardCount() int {
-	return len(m.maps)
+	return len(m.datas)
 }
