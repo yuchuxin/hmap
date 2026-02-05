@@ -24,7 +24,7 @@ Key 类型：目前仅支持 string 类型。如果需要其他类型的 Key，�
 ## 安装
 
 ```bash
-go get your-module-path/hmap
+go get github.com/yuchuxin/hmap
 ```
 
 ---
@@ -36,7 +36,7 @@ package main
 
 import (
     "fmt"
-    "your-module-path/hmap"
+    "github.com/yuchuxin/hmap"
 )
 
 func main() {
@@ -558,7 +558,7 @@ package main
 import (
     "fmt"
     "sync"
-    "your-module-path/hmap"
+    "github.com/yuchuxin/hmap"
 )
 
 func main() {
